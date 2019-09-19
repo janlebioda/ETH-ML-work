@@ -1,4 +1,10 @@
-#NOTE: most of the DecisionTree class and <10 other lines were not written by me - they formed the code I extended
+#NOTE: Most of the DecisionTree class and <10 other lines were not written by me - they formed the code I extended
+#NOTE: Some comments use LaTeX notation
+
+#NOTE: Some settings can be chosen below, others are at the beginning of the main function
+
+#TODO: Repetitions numbers for the random algorithm and for the computation of entropy might need to be tweaked
+#TODO: Testing approximate algorithms is not fully implemented
 
 import numpy as np
 import random
@@ -7,30 +13,51 @@ import copy
 import time
 
 
+print_debug = False
+
+#Run tests to check algorithm correctness?
+test_correctness = True
+
+
+#Errors of less than epsilon will be ignored (needed due to numerical errors)
 epsilon = 0.000000001
-Epsilon = 0.00001
 
 start_time = 0
 time_limit = 300 #5 minutes
 
-    
-#algorithm to run. Options: backtrack, entropy, random, half
-#TODO: add options for running approx algorithm
+#Random distribution of leaf values
+#The tree is generated with the values in the leafs generated independently at random from this distribution
+#Options: "cts" (Uniform([0, 100])), "finite" (Uniform({0, 1}))
+leaf_dist = "cts"
 
-algorithm = "half"
+#Algorithm to run for the exact recovery
+#Options: "backtrack", "backtrack_slow","entropy", "random", "most", "none"
+#NOTE/TODO: "backtrack_slow" seems to be producing trees with optimal node count in practice. However, I do not know if that has to be the case for every input Fourier series
+algorithm_exact = "most"
 
-
+#Algorithm to run for the approximate recovery
+#Options: "entropy", "most", "none"
+algorithm_approx = "none"
 
 class TimeLimitExceededError(Exception):
     pass
 
 
 
+#Represents a decision tree.
+#self.graph gives the structure of the tree by giving, for each node in the tree, the numbers of both its children (-1 if there is no child, 0 is the number of the root)
+#self.labels gives, for each node, the number of the variable assigned to it
+#self.leaves gives the real value assigned to each leaf
+#The value of the function represented by a decision tree on an argument arg is obtained by following the path from the root to a leaf. At node labeled with n-th variable we look at n-th coordinate of arg.
+#    If that coordinate has value 0 we go left and if it has value 1 we go right. The value of the function is the real number in the leaf we reach.
 class DecisionTree(object):
+    
+    #Creates a random decision tree of depth at most max_depth, with n_nodes nodes, that represents a function $\mathbb{F}_2^n \rightarrow \mathbb{R}$, where $n = n_var$
+    #The tree is created by consecutively adding random pairs of sibling nodes and then labeling nodes with variables and leaves with values
     def __init__(self, n_var, n_nodes, max_depth):
         self.n_var = n_var         #NOTE Leaves are also assigned variables
         self.n_nodes = n_nodes     #NOTE This does count leaves
-        self.max_depth = max_depth #NOTE This does count leaves, but assignes depth 0 to the root
+        self.max_depth = max_depth #NOTE This does count leaves, but assigns depth 0 to the root
 
         # 0 -> not available
         # 1 -> available
@@ -45,8 +72,11 @@ class DecisionTree(object):
             self.add_random_node()
 
         self.label_graph()
-        self.add_reals()
-
+        self.add_leaf_values()
+    
+    
+    #Randomly assigns labels(variables) to all nodes in the tree (including leaves)
+    #No label will appear twice on any path from the root to any leaf
     def label_graph(self):
         available_labels = np.ones(self.n_var)
         node_stack = [0]
@@ -69,13 +99,21 @@ class DecisionTree(object):
                 left = self.left(node)
                 if left in self.graph:
                     node_stack.append(left)
-    #TODO name + config at top
-    def add_reals(self):
+    
+    
+    #Picks values for all leaves independently at random from distribution given by leaf_dist
+    def add_leaf_values(self):
         for k, v in self.graph.items():
             if self.isleaf(k):
-                #self.leafs[k] = np.random.uniform(0, 100.0)
-                self.leafs[k] = np.random.randint(0, 2)
+                if leaf_dist == "cts":
+                    self.leafs[k] = np.random.uniform(0, 100.0)
+                elif leaf_dist == "finite":
+                    self.leafs[k] = np.random.randint(0, 2)
+                else:
+                    raise Exception(leaf_dist + " is not a valid distribution name")
 
+    
+    #Picks random node with no children and adds its 2 children to the tree
     def add_random_node(self):
         node = self.pick_free_node()
         self.available_nodes.remove(node)
@@ -91,7 +129,7 @@ class DecisionTree(object):
             self.available_nodes.add(new_node_right)
     
     
-    
+    #Returns a Fourier series (instance of the Fourier class) that defines the same function as the subdecision tree rooted at the node with number node_num (argument)
     def get_fourier(self, node_num):
         
         if self.isleaf(node_num):
@@ -113,24 +151,31 @@ class DecisionTree(object):
                 series[key] = series.get(key, 0) + (fourier_right.series[key]/2)
                 series[key.union([label])] = series.get(key.union([label]), 0) - (fourier_right.series[key]/2)
             
-            for key in list(series.keys()):
-                if abs(series[key]) < epsilon:
-                    series.pop(key)                
-            return Fourier(self.n_var, series)
+            fourier = Fourier(self.n_var, series)
+            fourier.cleanup()
+                    
+            return fourier
             
 
-
+    #Returns the number of a random leaf
     def pick_free_node(self):
         return np.random.choice(tuple(self.available_nodes))
-
+    
+    
+    #Returns the number of the left child of the node with number node_num (or the number that child would have if it existed)
     def left(self, node_num):
         return 2 * node_num + 1
-
+    
+    
+    #Returns the number of the right child of the node with number node_num (or the number that child would have if it existed)
     def right(self, node_num):
         return 2 * node_num + 2
-
+    
+    
+    #Returns depth of the node with number node_num
     def depth(self, node_num):
         return int(np.log2(node_num + 1))
+    
     
     def tree_depth(self):
         max_depth = 0
@@ -138,22 +183,30 @@ class DecisionTree(object):
             max_depth = max(max_depth, self.depth(node))
         return max_depth
 
+
     def isleaf(self, node_num):
         return sum(self.graph[node_num]) == -2
     
-    #evaluate the tree at key
-    def __getitem__(self, key):
+    
+    #Evaluate the tree at argument
+    def __getitem__(self, argument):
         curr = 0
         while not self.isleaf(curr):
             curr_var = self.labels[curr]
-            curr = self.graph[curr][key[curr_var]]
+            curr = self.graph[curr][argument[curr_var]]
         return self.leafs[curr]
 
 
 
-
-
-class RecursiveDecisionTree:#TODO rename to node and maybe add seperate tree class holding the root
+#Represents a decision tree recursively.
+#self.value is the real number in the root if the root is a leaf and None otherwise
+#self.label is the number of the variable assigned to the root (can be None if the root is a leaf)
+#self.left is the left subtree (can be None)
+#self.right is the right subtree (can be None)
+#The value of the function represented by a decision tree on an argument arg is obtained by following the path from the root to a leaf. At node labeled with n-th variable we look at n-th coordinate of arg.
+#    If that coordinate has value 0 we go left and if it has value 1 we go right. The value of the function is the real number in the leaf we reach.
+class RecursiveDecisionTree:
+    
     def __init__(self, value = None, label = None, left = None, right = None):
         self.value = value
         self.label = label
@@ -161,6 +214,8 @@ class RecursiveDecisionTree:#TODO rename to node and maybe add seperate tree cla
         self.right = right
             
             
+    #Returns a Fourier series (instance of the Fourier class) that defines the same function as the decision tree defined by this object
+    #n_var should be >= the highest number of variable in the tree
     def get_fourier(self, n_var):
 
         if self.isleaf():
@@ -170,6 +225,7 @@ class RecursiveDecisionTree:#TODO rename to node and maybe add seperate tree cla
                 return Fourier(n_var, {frozenset():self.value})
         else:
             label = self.label
+            assert label <= n_var, "n_var is too small - the tree uses variables with higher numbers"
             fourier_left = self.left.get_fourier(n_var)
             fourier_right = self.right.get_fourier(n_var)
             series = {}
@@ -215,29 +271,27 @@ class RecursiveDecisionTree:#TODO rename to node and maybe add seperate tree cla
             return str(self.label) + ": [" + str(self.left) + "," +  str(self.right) + "]"
         
         
-    #evaluate the tree at key
-    def __getitem__(self, key):
+    #Evaluate the tree at argument
+    def __getitem__(self, argument):
         if self.isleaf():
             return self.value
         else:
-            if key[self.label] == 0:
-                return self.left[key]
-            elif key[self.label] == 1:
-                return self.right[key]
+            if argument[self.label] == 0:
+                return self.left[argument]
+            elif argument[self.label] == 1:
+                return self.right[argument]
             else:
-                raise Exception("key can only contain 0s and 1s")
+                raise Exception("argument can only contain 0s and 1s")
             
-    #checks if self and other represent the same tree
+    #Checks if self and other represent the same tree
     def __eq__(self, other):
         return isinstance(other, RecursiveDecisionTree) and self.value == other.value and self.label == other.label and self.left == other.left and self.right == other.right
        
        
 
-#TODO identify sets with n-tuples
-#Represents a Fourier series of a function $\mathbb{F}_2^n \rightarrow \mathbb{R}$, where $n = n_var$
-#The represented Fourier series is $\sum_{F\in series.keys()} series[F]\cdot \chi_F$,
-#   where $\chi_F: \mathbb{F}_2^n \rightarrow \mathbb{R}$ is given by $\chi_F(S) = (-1)^{\sum_{i=1}^n F_i\cdot S_i}$
-
+#Represents a Fourier series of a function $\mathbb{F}_2^n \rightarrow \mathbb{R}$, where $n = n_var$ (note that below we identify elements of \mathbb{F}_2^n with subsets of {1, 2, ..., n})
+#The represented Fourier series is $\sum_{F\in series.keys()} series[F]\cdot \chi_F$, 
+#    where $\chi_F: \mathbb{F}_2^n \rightarrow \mathbb{R}$ is given by $\chi_F(S) = (-1)^{\sum_{i=1}^n F_i\cdot S_i}$
 class Fourier:
     
     def __init__(self, n_var, series):
@@ -247,7 +301,10 @@ class Fourier:
         self.cleanup()
     
     
-    def get_tree_approx(self, depth):#TODO config at the top
+    #Returns a tree of depth at most depth (argument) that approximates the function given by this Fourier series
+    #Builds the tree from top to bottom, obtaining Fourier series for children of the current node by conditioning on some coordinate of the input (label for the created node)
+    #The label to split on is chosen by one of the split_label algorithms 
+    def get_tree_approx(self, depth):
         
         if (time.clock() - start_time > time_limit):
             raise TimeLimitExceededError()
@@ -262,11 +319,14 @@ class Fourier:
         
         if depth == 0:
             return RecursiveDecisionTree(self.series.get(frozenset(), 0))
-    
-        #label = self.split_label_approx()
-        label = self.split_label()
-        #label = self.split_label_entropy()
-            
+        
+        if algorithm_approx == "most":
+            label = self.split_label_most()
+        elif algorithm_approx == "entropy":
+            label = self.split_label_entropy()
+        else: 
+            raise Exception(algorithm_approx + " is not a valid approximate algorithm name")
+        
         (fourier_left, fourier_right) = self.split_on(label)
         
         tree = RecursiveDecisionTree()
@@ -277,7 +337,7 @@ class Fourier:
         return tree              
             
         
-    
+    #Runs the backtrack algorithm for increasing goal depths, starting at self.degree(), until a tree is found
     def get_tree_fast_backtrack_start(self):
         depth = self.degree()
         tree = None
@@ -287,8 +347,11 @@ class Fourier:
         return tree
     
     
+    #Returns a tree defining the same function as this Fourier series if one of depth not greater that depth (argument) exist, otherwise returns None 
+    #Searches for a tree by trying various coordinates/variables/labels to condition on and cleverly backtracking
+    #   Drops branches of the backtrack where the tree cannot be found (if the degree of the series is greater than the goal depth)
+    #This algorithm works similarly to A*
     def get_tree_fast_backtrack(self, depth):
-        # Maybe we can just greedily reduce degree and still minimize number of nodes (TODO: check)
         
         if (time.clock() - start_time > time_limit):
             raise TimeLimitExceededError()
@@ -307,7 +370,7 @@ class Fourier:
                 return None
             
             deg = self.degree()
-            deg_reducing_variables = set(range(0, self.n_var))#can be faster if instead add all significant variables in the series to set
+            deg_reducing_variables = self.get_significant_vars()
             for key in self.series:
                 if len(key) == deg:
                     deg_reducing_variables.intersection_update(key)
@@ -331,7 +394,8 @@ class Fourier:
                     best_tree = tree
                     best_tree_node_count = tree.node_count()
                     
-                return tree #comment out for better node_count optimization (slow) TODO: config at the top
+                if algorithm_exact == "backtrack": #If algorithm_exact == "backtrack_slow" we try to search for a tree with few nodes instead of any tree
+                    return tree
 
             if best_tree != None:
                 return best_tree 
@@ -355,10 +419,9 @@ class Fourier:
             return None
         
                 
-    #Returns tree defining the same function as this Fourier series
-    #Builds the tree recursively, obtaining Fourier series for children of the current node by spliting on some input argument (label)
-    #The label to split on is chosen by one of the split_label algorithms
-            
+    #Returns a tree defining the same function as this Fourier series
+    #Builds the tree from top to bottom, obtaining Fourier series for children of the current node by conditioning on some coordinate of the input (label for the created node)
+    #The label to split on is chosen by one of the split_label algorithms            
     def get_tree(self, depth):
 
         if (time.clock() - start_time > time_limit):
@@ -373,14 +436,14 @@ class Fourier:
             return RecursiveDecisionTree(self.series.get(frozenset()))
         
         else:
-            if algorithm == "half":
-                label = self.split_label()
-            elif algorithm == "random":
+            if algorithm_exact == "most":
+                label = self.split_label_most()
+            elif algorithm_exact == "random":
                 label = self.split_label_random(depth)
-            elif algorithm == "entropy":
+            elif algorithm_exact == "entropy":
                 label = self.split_label_entropy(depth)
             else:
-                raise Exception(algorithm + " is not a valid algorithm name")
+                raise Exception(algorithm_exact + " is not a valid exact algorithm name")
 
             (fourier_left, fourier_right) = self.split_on(label)
 
@@ -391,7 +454,8 @@ class Fourier:
         
             return tree    
     
-    
+    #Conditions this Fourier series on the coordinate corresponding to label (argument)
+    #Returns the Fourier series obtained by conditioning that coordinate to be 0 (left series) and 1 (right series)
     def split_on(self, label):
         
         if (time.clock() - start_time > time_limit):
@@ -409,22 +473,8 @@ class Fourier:
         return (Fourier(self.n_var, series_left), Fourier(self.n_var, series_right))
     
     
-    def split_label_approx(self):#TODO remove(?)
-        
-        significant_vars = self.get_significant_vars()
-        best_var = None
-        lowest_penalty = math.inf
-        
-        for var in significant_vars:
-            penalty = self.penalty(var)
-            if penalty < lowest_penalty:
-                best_var = var
-                lowest_penalty = penalty
-        
-        return best_var
-    
-    
-    def split_label(self):#TODO add most/half to name
+    #Returns a label that appears in the highest number of keys corresponding to nonzero coefficients of the series
+    def split_label_most(self):
         
         if (time.clock() - start_time > time_limit):
             raise TimeLimitExceededError()
@@ -438,6 +488,7 @@ class Fourier:
         return label
     
     
+    #Returns a label such that conditioning on it gives two functions that do not share any values (with high probability)
     def split_label_random(self, depth):
     
         significant_vars = self.get_significant_vars()
@@ -450,11 +501,11 @@ class Fourier:
         for var in significant_vars:
             
             base_mask[var] = 0            
-            values_0 = self.get_possible_values(depth, base_mask.copy(), repetitions)
+            values_0 = self.get_possible_values(base_mask.copy(), repetitions)
             values_0 = set(map(lambda x: round(x, 9),values_0))
             
             base_mask[var] = 1
-            values_1 = self.get_possible_values(depth, base_mask.copy(), repetitions)
+            values_1 = self.get_possible_values(base_mask.copy(), repetitions)
             values_1 = set(map(lambda x: round(x, 9), values_1))
             
             base_mask[var] = -1
@@ -464,6 +515,8 @@ class Fourier:
             
         raise Exception("Labels not pairwise distinct!")
     
+    
+    #Returns a label such that conditioning on it maximizes the (estimated) information gain
     def split_label_entropy(self, depth):
         
         significant_vars = self.get_significant_vars()
@@ -482,12 +535,7 @@ class Fourier:
         return best_label
     
     
-    def penalty(self, label):#TODO remove (?)
-        
-        (fourier_left, fourier_right) = self.split_on(label)
-        return fourier_left.norm_non_constant() + fourier_right.norm_non_constant()
-    
-    
+    #Estimates the entropy of the function defined by this Fourier series (under uniform distribution on inputs)
     def entropy(self, depth):
         
         outcome_qunatities = {}
@@ -518,8 +566,8 @@ class Fourier:
         return entropy
         
     
-    
-    def get_possible_values(self, depth, mask, repetitions):#TODO depth necessary?
+    #Returns a set of all values that we obtain from this series in repetitions (argument) random trials by randomly setting each -1 in mask (argument) to 0 or 1 without changing 0's and 1's already there
+    def get_possible_values(self, mask, repetitions):
         
         obtained_values = set()
         i = 0
@@ -537,7 +585,8 @@ class Fourier:
             obtained_values.add(value)
         return obtained_values
     
-    #returns the set of all coordinates that appear in the Fourier series
+    
+    #Returns the set of all coordinates whose value can affect the value of the Fourier series
     def get_significant_vars(self):
         significant_vars = set()
         for key in self.series:
@@ -545,21 +594,15 @@ class Fourier:
                 significant_vars.add(x)
         return significant_vars
     
+    
     #Removes all coefficients that are within the error range (epsilon) from 0
     def cleanup(self):
         for key in list(self.series.keys()):
             if abs(self.series[key]) < epsilon:
                 self.series.pop(key)
-    
-    
-    '''def perturb(self):
-        series2 = {}
-        for key in self.series:
-            if self.series[key] != 0:
-                series2[key] = self.series[key] + np.random.uniform(-Epsilon, Epsilon)
-        self.series = series2'''
 
-    
+
+    #Returns the sum of the squares of the coefficients of this Fourier series
     def norm(self):
         result = 0
         for key in self.series:
@@ -567,14 +610,16 @@ class Fourier:
         return result
     
     
-    def norm_non_constant(self):
+    #Returns the sum of the squares of the nonconstant coefficients of this Fourier series
+    def norm_nonconstant(self):
         result = 0
         for key in self.series:
             if key != set():
                 result += self.series[key] * self.series[key]
         return result
     
-    #returns the degree of the series (len of the largest key)
+    
+    #Returns the degree of this Fourier series (len of the largest key)
     def degree(self):
         deg = 0
         for key in self.series:
@@ -587,7 +632,7 @@ class Fourier:
         return str(self.series)
         
         
-        #evaluate the series on argument
+        #Evaluate the series on argument
     def __getitem__(self, argument):
         result = 0
         for key in self.series:
@@ -607,8 +652,8 @@ class Fourier:
             
     
     
-    
- #returns the key associated with the biggest value in the dictionary 
+  
+#Returns the key associated with the biggest value in the dictionary 
 def get_max_key(dictionary):
     maks = -1
     item = None
@@ -618,29 +663,34 @@ def get_max_key(dictionary):
             item = key
     return item
 
+
+
 def random_argument(n_var):
     return random.choices([0,1],k = n_var)
 
 
+#Class used for running tests
+#To create a test add a new member of this class to the list of tests and choose the number of variables, number of nodes and depth of the tree
+#After a test is run in the main loop the variables representing the result will be set to the obtained values
 class Test:
     def __init__(self, n_var, n_nodes, depth):
         self.n_var = n_var
         self.n_nodes = n_nodes
         self.depth = depth
-        self.result = None#TODO: name this average_time(?)
+        self.average_time = None
         self.node_error_rate = None
         self.depth_error_rate = None
         self.node_count_ratio = None #average recovered_tree_node_count/source_tree_node_count
         self.depth_ratio = None      #average recovered_tree_depth/source_tree_depth
         
     def __str__(self):
-        return "[n_var = " + str(self.n_var) + ", n_nodes = " + str(self.n_nodes) + ", depth = " + str(self.depth) + "]: " + "result = " + str(self.result) + ", node_error_rate = " + str(self.node_error_rate) + ", depth_error_rate = " + str(self.depth_error_rate) + ", node_count_ratio = " + str(self.node_count_ratio) + ", depth_ratio = " + str(self.depth_ratio)
+        return "[n_var = " + str(self.n_var) + ", n_nodes = " + str(self.n_nodes) + ", depth = " + str(self.depth) + "]: " + "average_time = " + str(self.average_time) + ", node_error_rate = " + str(self.node_error_rate) + ", depth_error_rate = " + str(self.depth_error_rate) + ", node_count_ratio = " + str(self.node_count_ratio) + ", depth_ratio = " + str(self.depth_ratio)
 
 
 
 
 
-if __name__ == '__main__':#TODO entropy and random - tweak repetition numbers
+if __name__ == '__main__':
     
     #list of tests to run:
     
@@ -648,8 +698,8 @@ if __name__ == '__main__':#TODO entropy and random - tweak repetition numbers
         
             #Test(11,21,5), Test(100,21,5), Test(1000,21,5), Test(10000,21,5),  
             
-            #Test(11,101, 10), Test(100,101, 10), Test(1000,101, 10), Test(10000,101, 10),
-            #Test(11,201, 10), Test(100,201, 10), Test(1000,201, 10), Test(10000,201, 10), 
+            Test(11,101, 10), Test(100,101, 10), Test(1000,101, 10), Test(10000,101, 10),
+            Test(11,201, 10), Test(100,201, 10), Test(1000,201, 10), Test(10000,201, 10), 
             Test(11,401, 10), Test(100,401, 10), Test(1000,401, 10), Test(10000,401, 10), 
             Test(11,801, 10), Test(100,801, 10), Test(1000,801, 10), Test(10000,801, 10), 
             Test(11,1601, 10), Test(100,1601, 10), Test(1000,1601, 10), Test(10000,1601, 10),
@@ -660,18 +710,19 @@ if __name__ == '__main__':#TODO entropy and random - tweak repetition numbers
             #Test(16,401, 15), Test(100,401, 15), Test(1000,401, 15), Test(10000,401, 15), 
             #Test(16,801, 15), Test(100,801, 15), Test(1000,801, 15), Test(10000,801, 15),
             
-            ##Test(21,101, 20), Test(100,101, 20), Test(1000,101, 20), Test(10000,101, 20), 
+            #Test(21,101, 20), Test(100,101, 20), Test(1000,101, 20), Test(10000,101, 20), 
             #Test(21,201, 20), Test(100,201, 20), Test(1000,201, 20), Test(10000,201, 20), 
             #Test(21,401, 20), Test(100,401, 20), Test(1000,401, 20), Test(10000,401, 20) 
              ]
 
     
     for test in tests:
+        
+        n_trials = 100        
         seed_val = 123
         np.random.seed(seed_val)
-        random.seed(seed_val)
+        random.seed(seed_val)        
         
-        n_trials = 100
         time_sum = 0
         node_error_count = 0
         depth_error_count = 0
@@ -684,93 +735,88 @@ if __name__ == '__main__':#TODO entropy and random - tweak repetition numbers
             
                 n_var = test.n_var       #NOTE Leaves are also assigned variables
                 n_nodes = test.n_nodes   #NOTE This does count leaves
-                max_depth = test.depth   #NOTE This does count leaves, but assignes depth 0 to the root
+                max_depth = test.depth   #NOTE This does count leaves, but assigns depth 0 to the root
                 tree = DecisionTree(n_var, n_nodes, max_depth)
                 while(tree.tree_depth() != test.depth):
                     print(".", end = "")
                     tree = DecisionTree(n_var, n_nodes, max_depth)
-#                print()
-            
-#                print(tree.graph)
-#                print(tree.labels)
-#                print(tree.leafs)
-#                print("Depth of first tree:", tree.tree_depth())
-#                print("Nodes in first tree:", n_nodes)
+                
+                if print_debug:
+                    print(tree.graph)
+                    print(tree.labels)
+                    print(tree.leafs)
+                    print("Depth of first tree:", tree.tree_depth())
+                    print("Nodes in first tree:", n_nodes)
 
                 fourier = tree.get_fourier(0)
+                fourier_copy = copy.deepcopy(fourier)
                 
-                avg_coef={}
-                for key in fourier.series:
-                    avg_coef[len(key)] = avg_coef.get(len(key), 0) + fourier.series[key]
+                if print_debug:
+                    print("Fourier series:",fourier)
+                    print("Number of nonzero coefficients:" , len(fourier.series))
+                    print("Degree:", fourier.degree())
+                    print("Fourier norm:", fourier.norm())
                 
-                #print("Fourier series:",fourier)
-                #print(avg_coef)
-#                print("Number of nonzero coefficients:" , len(fourier.series))
-#                print("Degree:", fourier.degree())
-                #print("Fourier norm:", fourier.norm())
+                if test_correctness:                    
+                    assert(tree.tree_depth() >= fourier.degree())                
+                    for i in range(10000):
+                        argument = random_argument(n_var)
+                        assert(abs(tree[argument] - fourier[argument]) < epsilon)                
                 
-                start_time = time.clock()
-                
-                if algorithm == "backtrack":
-                    recursive_tree = fourier.get_tree_fast_backtrack_start()
-                else:
-                    recursive_tree = fourier.get_tree(fourier.degree())
-                
-                tree_recovery_time = time.clock() - start_time
-                time_sum += tree_recovery_time
-                result_node_count_sum += recursive_tree.node_count()
-                result_depth_sum += recursive_tree.tree_depth()
-                
-#                print("Tree recovery time:", tree_recovery_time)
-                
-#                print("Degree:", fourier.degree())
-                
-                #print("Recursive tree:", recursive_tree)
-#                print("Depth of recursive tree:", recursive_tree.tree_depth())
-#                print("Nodes in recursive tree:", recursive_tree.node_count())
-                
-            
-        #        recursive_tree_opt = fourier.get_tree_fast_backtrack_start()#TODO: not necessairly opt yet
-                
-                #print("Recursive tree 2:", recursive_tree_opt)
-        #        print("Depth of recursive tree 2:", recursive_tree_opt.tree_depth())
-        #        print("Nodes in recursive tree 2:", recursive_tree_opt.node_count())
-                
-        #        for i in range(20):
-        #            tree_approx = fourier.get_tree_approx(i)
-        #            print(i, (tree_approx.get_fourier(n_var) - fourier).norm())
-            
-                assert(tree.tree_depth() >= fourier.degree())
-        #        assert(fourier.degree() >= recursive_tree.tree_depth())
-                if (tree.tree_depth() < recursive_tree.tree_depth()):
-                    depth_error_count += 1
-                if (n_nodes < recursive_tree.node_count()):
-                    node_error_count += 1
-        #        assert(n_nodes == recursive_tree.node_count())
-        #       assert(fourier.degree() == recursive_tree_opt.tree_depth())
-        #        assert(n_nodes >= recursive_tree_opt.node_count())
-                #assert(recursive_tree.node_count() == recursive_tree3.node_count())
-        #        for i in range(10000):#TODO: config at the top
-        #            argument = random_argument(n_var)
-        #            assert(abs(tree[argument] - fourier[argument]) < epsilon)
-        #            assert(abs(tree[argument] - recursive_tree[argument]) < epsilon)
-        #            assert(abs(tree[argument] - recursive_tree_opt[argument]) < epsilon)
-                    #assert(abs(tree[argument] - recursive_tree3[argument]) < 100 * Epsilon)
+                if algorithm_exact != "none":
                     
+                    recursive_tree = None
+                    
+                    start_time = time.clock()
                 
-            test.result = round(time_sum/n_trials, 5)
-            test.node_error_rate =  round(node_error_count/n_trials, 5)
-            test.depth_error_rate = round(depth_error_count/n_trials, 5)
-            test.node_count_ratio = round(result_node_count_sum/(test.n_nodes * n_trials), 5)
-            test.depth_ratio =      round(result_depth_sum/(test.depth * n_trials), 5)
+                    if algorithm_exact == "backtrack" or algorithm_exact == "backtrack_slow":
+                        recursive_tree = fourier.get_tree_fast_backtrack_start()
+                    else:
+                        #TODO: The argument here (fourier.degree()) should be the depth of the tree, but we don't know that (though we could try values until a right one is found). However, this should usually be close enough
+                        recursive_tree = fourier.get_tree(fourier.degree())
+                
+                    tree_recovery_time = time.clock() - start_time
+                
+                    time_sum += tree_recovery_time
+                    result_node_count_sum += recursive_tree.node_count()
+                    result_depth_sum += recursive_tree.tree_depth()
+                    if (tree.tree_depth() < recursive_tree.tree_depth()):
+                        depth_error_count += 1
+                    if (n_nodes < recursive_tree.node_count()):
+                        node_error_count += 1
+        
+                    if print_debug:    
+                        print("Recursive tree:", recursive_tree)
+                        print("Depth of recursive tree:", recursive_tree.tree_depth())
+                        print("Nodes in recursive tree:", recursive_tree.node_count())
+                
+                    if test_correctness:
+                        for i in range(10000):
+                            argument = random_argument(n_var)
+                            assert(abs(tree[argument] - recursive_tree[argument]) < epsilon)
+
+                if algorithm_approx != "none":
+                    for i in range(20):
+                        tree_approx = fourier.get_tree_approx(i)
+                        print(i, (tree_approx.get_fourier(n_var) - fourier).norm())
+                  
+                if test_correctness:                    
+                    assert(fourier.n_var == fourier_copy.n_var and fourier.series == fourier_copy.series)
+                
+            if algorithm_exact != "none":    
+                test.average_time = round(time_sum/n_trials, 5)
+                test.node_error_rate =  round(node_error_count/n_trials, 5)
+                test.depth_error_rate = round(depth_error_count/n_trials, 5)
+                test.node_count_ratio = round(result_node_count_sum/(test.n_nodes * n_trials), 5)
+                test.depth_ratio =      round(result_depth_sum/(test.depth * n_trials), 5)
             print(test)
         
         except TimeLimitExceededError:
-            test.result = math.inf
+            test.average_time = "Time limit exceeded!"
             print(test)
             
-        except MemoryError: #memory limit has to be set using "ulimit -v"
-            test.result = "Memory error"
+        except MemoryError: #NOTE: Memory limit has to be set using "ulimit -v"
+            test.average_time = "Memory limit exceeded!"
             print(test)
         
     for test in tests:
